@@ -1,6 +1,10 @@
+import os
 import random
+import sys
 
-from hundir_la_flota import ia, ia_aprendizaje, utils
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from backend import ia, ia_aprendizaje, utils
 
 random.seed(7)
 
