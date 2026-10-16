@@ -7,7 +7,9 @@ funciones de tablero e IA en un estado serializable con historial.
 from __future__ import annotations
 
 import copy
+import inspect
 import random
+import textwrap
 import uuid
 from contextlib import contextmanager
 from typing import Any, Optional, Union
@@ -65,6 +67,30 @@ def _clone_fleet(flota: list[dict[str, set[tuple[int, int]]]]) -> list[dict[str,
     ]
 
 
+def _fleet_payload(
+    flota: list[dict[str, set[tuple[int, int]]]], pending: Optional[list[int]] = None
+) -> list[dict[str, Any]]:
+    ships = [
+        {
+            "length": len(barco["todas"]),
+            "hits": len(barco["todas"]) - len(barco["vivas"]),
+            "sunk": not bool(barco["vivas"]),
+            "placed": True,
+        }
+        for barco in flota
+    ]
+    for length in pending or []:
+        ships.append({"length": length, "hits": 0, "sunk": False, "placed": False})
+    return ships
+
+
+def _strategy_source(strategy: Any) -> str:
+    try:
+        return textwrap.dedent(inspect.getsource(strategy.__class__.elegir_disparo)).strip()
+    except (OSError, TypeError):
+        return "def elegir_disparo(self):\n    return self._al_azar()"
+
+
 class GameSession:
     """Estado completo de una partida web de Hundir la Flota."""
 
@@ -80,6 +106,7 @@ class GameSession:
         self.history_index = -1
         self.ai_shots_log: list[dict[str, Any]] = []
         self.player_shots_log: list[dict[str, Any]] = []
+        self.last_ai_decision: Optional[dict[str, Any]] = None
         self._event_seq = 0
         self._rng_state = random.getstate()
 
@@ -189,6 +216,7 @@ class GameSession:
             "strategy": copy.deepcopy(self.strategy),
             "ai_shots_log": copy.deepcopy(self.ai_shots_log),
             "player_shots_log": copy.deepcopy(self.player_shots_log),
+            "last_ai_decision": copy.deepcopy(self.last_ai_decision),
             "trace": copy.deepcopy(self.trace),
             "event_seq": self._event_seq,
             "rng_state": copy.deepcopy(self._rng_state),
@@ -209,6 +237,7 @@ class GameSession:
         self.strategy = copy.deepcopy(snapshot["strategy"])
         self.ai_shots_log = copy.deepcopy(snapshot["ai_shots_log"])
         self.player_shots_log = copy.deepcopy(snapshot["player_shots_log"])
+        self.last_ai_decision = copy.deepcopy(snapshot["last_ai_decision"])
         self.trace = copy.deepcopy(snapshot["trace"])
         self._event_seq = snapshot["event_seq"]
         self._rng_state = copy.deepcopy(snapshot["rng_state"])
@@ -329,6 +358,17 @@ class GameSession:
         self._record(f"Dificultad cambiada a {DIFFICULTIES[difficulty]}", events)
         return self.public_state()
 
+    def _predict_ai_target(self) -> Optional[tuple[int, int]]:
+        if self.phase != PHASE_PLAYING:
+            return None
+        previous_state = random.getstate()
+        predicted_strategy = copy.deepcopy(self.strategy)
+        random.setstate(self._rng_state)
+        try:
+            return predicted_strategy.elegir_disparo()
+        finally:
+            random.setstate(previous_state)
+
     def shoot(self, row: int, col: int) -> dict[str, Any]:
         if self.phase != PHASE_PLAYING:
             raise GameError("La partida no esta en fase de disparos.")
@@ -370,6 +410,8 @@ class GameSession:
             return self.public_state()
 
         with self._rng_context():
+            strategy_name = self.strategy.__class__.__name__
+            strategy_code = _strategy_source(self.strategy)
             ai_target = self.strategy.elegir_disparo()
             if ai_target is None:
                 raise GameError("La IA no encuentra disparos disponibles.", status_code=500)
@@ -385,6 +427,18 @@ class GameSession:
             ai_result = utils.disparar(ai_target, self.player_board, self.player_index)
             sunk_ship = sorted(self.player_index[ai_target]["todas"]) if ai_result == "hundido" else []
             self.strategy.registrar(ai_target, ai_result, sunk_ship or None)
+            self.last_ai_decision = {
+                "difficulty": self.difficulty,
+                "strategy": strategy_name,
+                "function": f"{strategy_name}.elegir_disparo",
+                "code": strategy_code,
+                "chosen": _cell_payload(ai_target),
+                "result": ai_result,
+                "message": (
+                    f"La IA uso {strategy_name}.elegir_disparo y eligio "
+                    f"fila {ai_target[0]}, columna {ai_target[1]}."
+                ),
+            }
             self.ai_shots_log.append(
                 {"casilla": ai_target, "resultado": ai_result, "barco": list(sunk_ship)}
             )
@@ -446,6 +500,7 @@ class GameSession:
     def public_state(self) -> dict[str, Any]:
         enemy_board = self.ai_board if self.phase == PHASE_FINISHED else utils.ocultar_barcos(self.ai_board)
         pending = self.pending_ships()
+        next_ai_target = self._predict_ai_target()
         return {
             "id": self.id,
             "size": self.size,
@@ -466,6 +521,12 @@ class GameSession:
                 "player": utils.barcos_vivos(self.player_fleet),
                 "enemy": utils.barcos_vivos(self.ai_fleet),
             },
+            "fleetStatus": {
+                "player": _fleet_payload(self.player_fleet, pending),
+                "enemy": _fleet_payload(self.ai_fleet),
+            },
+            "lastAiDecision": self.last_ai_decision,
+            "nextAiTarget": _cell_payload(next_ai_target) if next_ai_target else None,
             "historyIndex": self.history_index,
             "history": [
                 {

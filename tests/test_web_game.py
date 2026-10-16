@@ -67,6 +67,7 @@ def test_random_placement_completes_player_fleet():
 
     assert state["phase"] == PHASE_PLAYING
     assert len(game.player_fleet) == len(utils.FLOTA)
+    assert len(state["fleetStatus"]["player"]) == len(utils.FLOTA)
     assert state["nextShip"] is None
 
 
@@ -79,7 +80,24 @@ def test_player_shot_triggers_ai_response_and_trace():
     assert state["phase"] in (PHASE_PLAYING, PHASE_FINISHED)
     assert state["turn"] == 1
     assert len(game.ai_shots_log) == 1
+    assert state["lastAiDecision"]["chosen"] == {
+        "row": game.ai_shots_log[-1]["casilla"][0],
+        "col": game.ai_shots_log[-1]["casilla"][1],
+    }
+    assert state["nextAiTarget"] is not None
     assert any(event["funcion"] == "utils.disparar" for event in state["trace"])
+
+
+def test_fleet_status_keeps_sunk_ships_visible():
+    game = ready_game()
+    target_ship = sorted(game.ai_fleet[0]["todas"])
+    state = None
+    for row, col in target_ship:
+        state = game.shoot(row, col)
+
+    assert state is not None
+    assert len(state["fleetStatus"]["enemy"]) == len(utils.FLOTA)
+    assert any(ship["sunk"] for ship in state["fleetStatus"]["enemy"])
 
 
 def test_difficulty_change_rebuilds_strategy_without_repeating_ai_shots():
@@ -121,6 +139,7 @@ if __name__ == "__main__":
     test_manual_placement_rejects_invalid_cells_and_starts_game()
     test_random_placement_completes_player_fleet()
     test_player_shot_triggers_ai_response_and_trace()
+    test_fleet_status_keeps_sunk_ships_visible()
     test_difficulty_change_rebuilds_strategy_without_repeating_ai_shots()
     test_rewind_restores_state_and_next_action_branches_history()
     test_terminal_entrypoint_still_imports()

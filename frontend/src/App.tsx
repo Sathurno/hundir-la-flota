@@ -1,8 +1,8 @@
 import {
   Brain,
+  Code2,
   Compass,
-  History,
-  MousePointer2,
+  Crosshair,
   RefreshCw,
   RotateCcw,
   Ship,
@@ -11,17 +11,9 @@ import {
   Waves,
   type LucideIcon
 } from "lucide-react";
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
-import {
-  changeDifficulty,
-  createGame,
-  placeRandom,
-  placeShip,
-  resetPlacement,
-  rewind,
-  shoot
-} from "./api";
-import type { CellState, Difficulty, GameState, Orientation, TraceEvent } from "./types";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode, type WheelEvent } from "react";
+import { changeDifficulty, createGame, placeRandom, placeShip, resetPlacement, shoot } from "./api";
+import type { CellCoord, CellState, Difficulty, FleetShip, GameState, Orientation } from "./types";
 
 type HoverCell = { row: number; col: number } | null;
 type Preview = { keys: Set<string>; valid: boolean };
@@ -60,12 +52,8 @@ function cellLabel(cell: CellState) {
   return "";
 }
 
-function jsonLine(value: unknown) {
-  try {
-    return JSON.stringify(value) ?? String(value);
-  } catch {
-    return String(value);
-  }
+function coordText(coord: CellCoord | null) {
+  return coord ? `${coord.row},${coord.col}` : "-";
 }
 
 function App() {
@@ -124,6 +112,12 @@ function App() {
   const canPlace = game?.phase === "placement" && !busy;
   const canShoot = game?.phase === "playing" && !busy;
 
+  function handlePlacementWheel(event: WheelEvent<HTMLElement>) {
+    if (!canPlace) return;
+    event.preventDefault();
+    setOrientation(event.deltaY > 0 ? "vertical" : "horizontal");
+  }
+
   return (
     <main className="app-shell">
       <div className="ocean-motion" aria-hidden="true" />
@@ -159,12 +153,6 @@ function App() {
             </select>
           </label>
 
-          <SegmentedOrientation
-            orientation={orientation}
-            disabled={!canPlace}
-            onChange={setOrientation}
-          />
-
           <IconButton
             icon={Shuffle}
             label="Aleatorio"
@@ -177,12 +165,7 @@ function App() {
             disabled={!canPlace || !game || game.pendingShips.length === game.fleet.length}
             onClick={() => game && void run(() => resetPlacement(game.id))}
           />
-          <IconButton
-            icon={RefreshCw}
-            label="Nueva"
-            disabled={busy}
-            onClick={() => void startGame()}
-          />
+          <IconButton icon={RefreshCw} label="Nueva" disabled={busy} onClick={() => void startGame()} />
         </div>
       </header>
 
@@ -196,20 +179,29 @@ function App() {
               icon={Ship}
               board={game.boards.player}
               active={game.phase === "placement"}
-              remaining={game.remaining.player}
+              fleet={game.fleetStatus.player}
+              predicted={game.nextAiTarget}
               preview={preview}
+              onWheel={handlePlacementWheel}
               onHover={setHover}
               onLeave={() => setHover(null)}
               onCellClick={(row, col) => {
                 if (canPlace) void run(() => placeShip(game.id, { row, col, orientation }));
               }}
+              footer={
+                <SegmentedOrientation
+                  orientation={orientation}
+                  disabled={!canPlace}
+                  onChange={setOrientation}
+                />
+              }
             />
             <Board
               title="Tablero IA"
               icon={Target}
               board={game.boards.enemy}
               active={game.phase === "playing"}
-              remaining={game.remaining.enemy}
+              fleet={game.fleetStatus.enemy}
               onCellClick={(row, col, cell) => {
                 if (canShoot && cell === "_") void run(() => shoot(game.id, { row, col }));
               }}
@@ -217,18 +209,12 @@ function App() {
           </div>
 
           <aside className="side-panel">
-            <section className="meter-strip">
-              <Metric label="Disparos jugador" value={game.shots.player} />
-              <Metric label="Disparos IA" value={game.shots.ia} />
-              <Metric label="Barcos pendientes" value={game.pendingShips.length} />
-            </section>
-
             <section className="difficulty-note">
               <Brain size={18} aria-hidden="true" />
               <span>{DIFFICULTY_COPY[game.difficulty]}</span>
             </section>
 
-            <TracePanel game={game} busy={busy} onRewind={(index) => run(() => rewind(game.id, index))} />
+            <AiDecisionPanel game={game} />
           </aside>
         </section>
       ) : (
@@ -298,8 +284,11 @@ function Board({
   icon: Icon,
   board,
   active,
-  remaining,
+  fleet,
+  predicted,
   preview,
+  footer,
+  onWheel,
   onHover,
   onLeave,
   onCellClick
@@ -308,8 +297,11 @@ function Board({
   icon: LucideIcon;
   board: CellState[][];
   active: boolean;
-  remaining: number[];
+  fleet: FleetShip[];
+  predicted?: CellCoord | null;
   preview?: Preview | null;
+  footer?: ReactNode;
+  onWheel?: (event: WheelEvent<HTMLElement>) => void;
   onHover?: (cell: HoverCell) => void;
   onLeave?: () => void;
   onCellClick: (row: number, col: number, cell: CellState) => void;
@@ -318,17 +310,13 @@ function Board({
   const style = { "--board-size": size } as CSSProperties;
 
   return (
-    <section className={`board-panel ${active ? "is-active" : ""}`}>
+    <section className={`board-panel ${active ? "is-active" : ""}`} onWheel={onWheel}>
       <div className="board-heading">
         <h2>
           <Icon size={18} aria-hidden="true" />
           {title}
         </h2>
-        <div className="fleet-pips" aria-label="Barcos vivos">
-          {remaining.map((ship, index) => (
-            <span key={`${ship}-${index}`}>{ship}</span>
-          ))}
-        </div>
+        <FleetPips fleet={fleet} />
       </div>
 
       <div className="board-grid" style={style}>
@@ -336,10 +324,12 @@ function Board({
           row.map((cell, colIndex) => {
             const key = keyOf(rowIndex, colIndex);
             const inPreview = preview?.keys.has(key) ?? false;
+            const isPredicted = predicted?.row === rowIndex && predicted.col === colIndex;
             const classes = [
               "cell",
               `cell-${cellClass(cell)}`,
-              inPreview ? (preview?.valid ? "preview-valid" : "preview-invalid") : ""
+              inPreview ? (preview?.valid ? "preview-valid" : "preview-invalid") : "",
+              isPredicted ? "cell-predicted" : ""
             ]
               .filter(Boolean)
               .join(" ");
@@ -360,77 +350,62 @@ function Board({
           })
         )}
       </div>
+
+      {footer ? <div className="board-footer">{footer}</div> : null}
     </section>
   );
 }
 
-function Metric({ label, value }: { label: string; value: number }) {
+function FleetPips({ fleet }: { fleet: FleetShip[] }) {
   return (
-    <div className="metric">
-      <span>{label}</span>
-      <strong>{value}</strong>
+    <div className="fleet-pips" aria-label="Estado de barcos">
+      {fleet.map((ship, index) => (
+        <span
+          key={`${ship.length}-${index}`}
+          className={`${ship.sunk ? "is-sunk" : ""} ${ship.placed ? "" : "is-pending"}`}
+        >
+          {ship.length}
+        </span>
+      ))}
     </div>
   );
 }
 
-function TracePanel({
-  game,
-  busy,
-  onRewind
-}: {
-  game: GameState;
-  busy: boolean;
-  onRewind: (index: number) => Promise<void>;
-}) {
+function AiDecisionPanel({ game }: { game: GameState }) {
+  const decision = game.lastAiDecision;
+
   return (
-    <section className="trace-panel">
+    <section className="decision-panel">
       <div className="trace-heading">
         <h2>
-          <History size={18} aria-hidden="true" />
-          Historial
+          <Code2 size={18} aria-hidden="true" />
+          Decision IA
         </h2>
       </div>
 
-      <div className="timeline">
-        {game.history.map((step) => (
-          <button
-            key={step.index}
-            type="button"
-            className={step.index === game.historyIndex ? "selected" : ""}
-            disabled={busy}
-            onClick={() => void onRewind(step.index)}
-          >
-            <span>{step.index}</span>
-            <strong>{step.label}</strong>
-          </button>
-        ))}
-      </div>
+      {game.nextAiTarget ? (
+        <div className="next-target">
+          <Crosshair size={17} aria-hidden="true" />
+          <span>Proxima seleccion: {coordText(game.nextAiTarget)}</span>
+        </div>
+      ) : null}
 
-      <div className="trace-list">
-        {game.trace.map((event) => (
-          <TraceItem key={event.id} event={event} />
-        ))}
-      </div>
+      {decision ? (
+        <>
+          <div className="decision-summary">
+            <strong>{decision.function}</strong>
+            <span>
+              Eligio {coordText(decision.chosen)} y obtuvo {decision.result}.
+            </span>
+          </div>
+          <pre className="code-card">
+            <code>{decision.code}</code>
+          </pre>
+        </>
+      ) : (
+        <div className="empty-decision">La IA todavia no ha tomado una decision de disparo.</div>
+      )}
     </section>
-  );
-}
-
-function TraceItem({ event }: { event: TraceEvent }) {
-  return (
-    <article className={`trace-item actor-${event.actor}`}>
-      <div className="trace-meta">
-        <span>{event.actor}</span>
-        <span>turno {event.turn}</span>
-      </div>
-      <code>
-        {event.funcion}({jsonLine(event.entrada)})
-      </code>
-      <p>{event.mensaje}</p>
-      <div className="trace-result">
-        <MousePointer2 size={14} aria-hidden="true" />
-        <span>{jsonLine(event.resultado)}</span>
-      </div>
-    </article>
   );
 }
 

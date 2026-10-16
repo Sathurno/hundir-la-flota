@@ -24,6 +24,28 @@ export interface HistoryStep {
   events: TraceEvent[];
 }
 
+export interface CellCoord {
+  row: number;
+  col: number;
+}
+
+export interface FleetShip {
+  length: number;
+  hits: number;
+  sunk: boolean;
+  placed: boolean;
+}
+
+export interface AiDecision {
+  difficulty: Difficulty;
+  strategy: string;
+  function: string;
+  code: string;
+  chosen: CellCoord;
+  result: string;
+  message: string;
+}
+
 export interface GameState {
   id: string;
   size: number;
@@ -44,6 +66,12 @@ export interface GameState {
     player: number[];
     enemy: number[];
   };
+  fleetStatus: {
+    player: FleetShip[];
+    enemy: FleetShip[];
+  };
+  lastAiDecision: AiDecision | null;
+  nextAiTarget: CellCoord | null;
   historyIndex: number;
   history: HistoryStep[];
   trace: TraceEvent[];
